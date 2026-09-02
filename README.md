@@ -40,7 +40,14 @@ python loop_detector.py scan --json
 
 ## 공식 훅 설치
 
-두 설정 파일은 저장소에 포함되어 있습니다. 전역 설정 파일을 수정하지 않습니다.
+현재 프로젝트에는 두 설정 파일이 포함되어 있습니다. 다른 프로젝트에도 설치하려면 대상 프로젝트에서 이 저장소의 절대 경로로 실행합니다.
+
+```powershell
+python C:\path\to\loop-detector\loop_detector.py install
+python C:\path\to\loop-detector\loop_detector.py install --target C:\path\to\another-project
+```
+
+설치 명령은 대상의 기존 JSON을 검증한 뒤 Claude Code와 Codex 훅을 병합합니다. 기존 훅은 유지하며, 같은 loop-detector 훅이 이미 있으면 중복 등록하지 않습니다. 설치 뒤에는 `loop_detector.py`를 이동하거나 삭제하지 마세요.
 
 ### Claude Code
 

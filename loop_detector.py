@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 import re
+import shlex
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -231,6 +233,78 @@ def claude_hook_warning(payload: dict) -> str | None:
     return f"[loop-detector] {tool_name} has failed the same way {count} times in a row. Stop retrying the same fix — reconsider the approach."
 
 
+def read_settings(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path} is not valid JSON") from exc
+    if not isinstance(settings, dict):
+        raise ValueError(f"{path} must contain a JSON object")
+    return settings
+
+
+def install_hook(settings: dict, event: str, matcher: str, handler: dict) -> bool:
+    hooks = settings.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError("hooks must be a JSON object")
+    groups = hooks.setdefault(event, [])
+    if not isinstance(groups, list):
+        raise ValueError(f"hooks.{event} must be a JSON array")
+    for group in groups:
+        if not isinstance(group, dict) or group.get("matcher") != matcher:
+            continue
+        handlers = group.setdefault("hooks", [])
+        if not isinstance(handlers, list):
+            raise ValueError(f"hooks.{event}.hooks must be a JSON array")
+        for existing in handlers:
+            if not isinstance(existing, dict):
+                continue
+            args = existing.get("args", [])
+            if not isinstance(args, list):
+                raise ValueError("hook handler args must be a JSON array")
+            values = [existing.get("command", ""), *args]
+            if any("loop_detector.py" in str(value) for value in values):
+                return False
+        handlers.append(handler)
+        return True
+    groups.append({"matcher": matcher, "hooks": [handler]})
+    return True
+
+
+def write_settings(path: Path, settings: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def install_configs(target: Path) -> list[tuple[Path, bool]]:
+    source = str(Path(__file__).resolve())
+    python = str(Path(sys.executable).resolve())
+    command_parts = [python, source, "hook"]
+    claude_handler = {"type": "command", "command": python, "args": [source, "hook"], "timeout": 10}
+    codex_handler = {
+        "type": "command",
+        "command": " ".join(shlex.quote(part) for part in command_parts),
+        "commandWindows": subprocess.list2cmdline(command_parts),
+        "timeout": 10,
+    }
+    targets = [
+        (target / ".claude" / "settings.json", "PostToolUseFailure", "*", claude_handler),
+        (target / ".codex" / "hooks.json", "PostToolUse", "^Bash$", codex_handler),
+    ]
+    results = []
+    for path, event, matcher, handler in targets:
+        settings = read_settings(path)
+        changed = install_hook(settings, event, matcher, handler)
+        if changed:
+            write_settings(path, settings)
+        results.append((path, changed))
+    return results
+
+
 def cmd_hook() -> None:
     """Claude Code and Codex hook entry point. Internal failures stay fail-open."""
     try:
@@ -249,6 +323,21 @@ def cmd_hook() -> None:
         sys.exit(2)
 
 
+def cmd_install(args) -> None:
+    target = Path(args.target).resolve()
+    if not target.is_dir():
+        print(f"target directory not found: {target}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        results = install_configs(target)
+    except (OSError, ValueError) as exc:
+        print(f"installation failed: {exc}", file=sys.stderr)
+        sys.exit(2)
+    for path, changed in results:
+        print(f"{'installed' if changed else 'already installed'}: {path}")
+    print("Codex: start a new session, then review and trust the hook with /hooks.")
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -258,10 +347,14 @@ def main():
     scan_p.add_argument("--all", action="store_true", help="scan every session across all projects")
     scan_p.add_argument("--json", action="store_true", help="emit JSON instead of text")
     sub.add_parser("hook", help="Claude Code/Codex hook entry point (reads hook JSON from stdin)")
+    install_p = sub.add_parser("install", help="install Claude Code and Codex hooks into a project")
+    install_p.add_argument("--target", default=".", help="project directory to configure (default: current directory)")
     args = ap.parse_args()
 
     if args.cmd == "hook":
         cmd_hook()
+    elif args.cmd == "install":
+        cmd_install(args)
     else:
         cmd_scan(args)
 

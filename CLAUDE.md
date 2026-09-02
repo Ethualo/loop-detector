@@ -19,12 +19,15 @@ python loop_detector.py scan          # 현재 cwd 프로젝트 최신 세션
 python loop_detector.py scan --all    # 전체 세션
 python loop_detector.py scan --json
 python loop_detector.py hook          # Claude Code/Codex 훅 진입점, stdin으로 훅 JSON 받음
+python loop_detector.py install       # 현재 프로젝트에 Claude Code/Codex 훅 설치
+python loop_detector.py install --target C:\path\to\project
 ```
 
 ### 공식 훅 설치
 
 - Claude Code는 커밋된 `.claude/settings.json`을 프로젝트 설정으로 읽는다. `PostToolUseFailure`에서 기존 transcript tail을 판정하고, 반복 실패면 stderr + exit 2로 Claude에게 경고한다.
 - Codex는 커밋된 `.codex/hooks.json`을 공식 프로젝트 훅 위치로 읽는다. 새 Codex 세션에서 `/hooks`로 훅을 검토·신뢰하면 `PostToolUse`의 Bash non-zero 결과를 세션별로 3회 추적해 `additionalContext` 경고를 준다. 전역 설정 수정은 필요 없다.
+- `install`은 대상 프로젝트의 두 JSON 설정을 병합해 이 스크립트의 절대 경로를 등록한다. 기존 훅은 보존하고, 이미 등록된 loop-detector 훅은 중복 추가하지 않는다.
 
 ## 테스트
 

@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from loop_detector import claude_hook_warning, codex_hook_warning, detect_repeated_runs, fingerprint, trailing_repeat_failure
+from loop_detector import claude_hook_warning, codex_hook_warning, detect_repeated_runs, fingerprint, install_configs, install_hook, read_settings, trailing_repeat_failure
 
 
 def test_fingerprint_masks_placeholders():
@@ -101,6 +101,35 @@ def test_codex_hook_warning_reports_three_matching_bash_failures_and_clears_on_s
         assert codex_hook_warning(failure, state_dir) is None
 
 
+def test_install_hook_merges_without_duplicate_or_overwrite():
+    settings = {"hooks": {"PostToolUseFailure": [{"matcher": "*", "hooks": [{"type": "command", "command": "keep-me"}]}]}}
+    handler = {"type": "command", "command": "python", "args": ["C:/tools/loop_detector.py", "hook"]}
+    assert install_hook(settings, "PostToolUseFailure", "*", handler)
+    handlers = settings["hooks"]["PostToolUseFailure"][0]["hooks"]
+    assert [handler["command"] for handler in handlers] == ["keep-me", "python"]
+    assert not install_hook(settings, "PostToolUseFailure", "*", handler)
+
+
+def test_install_configs_creates_both_configs_and_is_idempotent():
+    with TemporaryDirectory(dir=Path(__file__).parent) as directory:
+        target = Path(directory)
+        results = install_configs(target)
+        assert all(changed for _, changed in results)
+        assert read_settings(target / ".claude" / "settings.json")["hooks"]["PostToolUseFailure"]
+        assert read_settings(target / ".codex" / "hooks.json")["hooks"]["PostToolUse"]
+        assert not any(changed for _, changed in install_configs(target))
+
+
+def test_install_hook_rejects_invalid_existing_args():
+    settings = {"hooks": {"PostToolUseFailure": [{"matcher": "*", "hooks": [{"args": "not-an-array"}]}]}}
+    try:
+        install_hook(settings, "PostToolUseFailure", "*", {"type": "command"})
+    except ValueError as exc:
+        assert "args" in str(exc)
+    else:
+        assert False, "invalid hook args must not be overwritten"
+
+
 if __name__ == "__main__":
     test_fingerprint_masks_placeholders()
     test_detect_repeated_runs_finds_retry_loop()
@@ -112,4 +141,7 @@ if __name__ == "__main__":
     test_trailing_repeat_failure_none_below_threshold()
     test_claude_hook_warning_uses_failed_transcript_tail()
     test_codex_hook_warning_reports_three_matching_bash_failures_and_clears_on_success()
+    test_install_hook_merges_without_duplicate_or_overwrite()
+    test_install_configs_creates_both_configs_and_is_idempotent()
+    test_install_hook_rejects_invalid_existing_args()
     print("all checks passed")
