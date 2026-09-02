@@ -1,5 +1,9 @@
 """Minimal assert-based checks. No framework, per project convention."""
-from loop_detector import fingerprint, detect_repeated_runs, trailing_repeat_failure
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from loop_detector import claude_hook_warning, codex_hook_warning, detect_repeated_runs, fingerprint, trailing_repeat_failure
 
 
 def test_fingerprint_masks_placeholders():
@@ -65,6 +69,38 @@ def test_trailing_repeat_failure_none_below_threshold():
     assert trailing_repeat_failure(events) is None
 
 
+def test_claude_hook_warning_uses_failed_transcript_tail():
+    with TemporaryDirectory(dir=Path(__file__).parent) as directory:
+        transcript = Path(directory) / "session.jsonl"
+        records = []
+        for number in range(3):
+            records.extend([
+                {"message": {"content": [{"type": "tool_use", "id": f"toolu_{number}", "name": "Bash", "input": {"command": "npm test"}}]}},
+                {"message": {"content": [{"type": "tool_result", "tool_use_id": f"toolu_{number}", "is_error": True, "content": "test failed"}]}},
+            ])
+        transcript.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
+        warning = claude_hook_warning({"transcript_path": str(transcript)})
+        assert warning and "3 times" in warning
+
+
+def test_codex_hook_warning_reports_three_matching_bash_failures_and_clears_on_success():
+    with TemporaryDirectory(dir=Path(__file__).parent) as directory:
+        state_dir = Path(directory)
+        failure = {
+            "hook_event_name": "PostToolUse",
+            "session_id": "session-1",
+            "tool_name": "Bash",
+            "tool_response": {"output": "test failed at C:\\work\\a.py:12", "metadata": {"exit_code": 1}},
+        }
+        assert codex_hook_warning(failure, state_dir) is None
+        assert codex_hook_warning(failure, state_dir) is None
+        warning = codex_hook_warning(failure, state_dir)
+        assert warning and "3회" in warning
+        success = {**failure, "tool_response": {"output": "ok", "metadata": {"exit_code": 0}}}
+        assert codex_hook_warning(success, state_dir) is None
+        assert codex_hook_warning(failure, state_dir) is None
+
+
 if __name__ == "__main__":
     test_fingerprint_masks_placeholders()
     test_detect_repeated_runs_finds_retry_loop()
@@ -74,4 +110,6 @@ if __name__ == "__main__":
     test_trailing_repeat_failure_detects_active_loop_at_tail()
     test_trailing_repeat_failure_none_when_loop_already_broken()
     test_trailing_repeat_failure_none_below_threshold()
+    test_claude_hook_warning_uses_failed_transcript_tail()
+    test_codex_hook_warning_reports_three_matching_bash_failures_and_clears_on_success()
     print("all checks passed")

@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 """Scan Claude Code session transcripts for repeated-failure patterns."""
 import argparse
+import hashlib
 import json
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -159,24 +161,92 @@ def cmd_scan(args) -> None:
             print(f"  [{f['type']}] {f['tool']} x{f['count']}: {f['fingerprint'][:200]}")
 
 
+def response_failed(response: Any) -> bool | None:
+    if isinstance(response, dict):
+        for key in ("is_error", "isError"):
+            if isinstance(response.get(key), bool):
+                return response[key]
+        for key in ("exit_code", "exitCode"):
+            value = response.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value != 0
+            if isinstance(value, str) and value.lstrip("-").isdigit():
+                return int(value) != 0
+        for value in response.values():
+            result = response_failed(value)
+            if result is not None:
+                return result
+    elif isinstance(response, list):
+        for value in response:
+            result = response_failed(value)
+            if result is not None:
+                return result
+    return None
+
+
+def hook_state_path(session_id: str, state_dir: Path) -> Path:
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    return state_dir / f"{digest}.json"
+
+
+def codex_hook_warning(payload: dict, state_dir: Path | None = None) -> str | None:
+    if payload.get("hook_event_name") != "PostToolUse":
+        return None
+    session_id = payload.get("session_id")
+    tool_name = payload.get("tool_name")
+    failed = response_failed(payload.get("tool_response"))
+    if not isinstance(session_id, str) or not isinstance(tool_name, str) or failed is None:
+        return None
+
+    state_root = state_dir or Path(tempfile.gettempdir()) / "loop-detector"
+    path = hook_state_path(session_id, state_root)
+    if not failed:
+        path.unlink(missing_ok=True)
+        return None
+
+    fingerprint_value = fingerprint(payload["tool_response"])
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        state = {}
+    count = state.get("count", 0) + 1 if state.get("tool") == tool_name and state.get("fingerprint") == fingerprint_value else 1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"tool": tool_name, "fingerprint": fingerprint_value, "count": count}), encoding="utf-8")
+    # ponytail: same-session parallel hooks can lose an increment; add file locking if Codex starts them concurrently.
+    temporary.replace(path)
+    if count >= REPEAT_THRESHOLD:
+        return f"[loop-detector] {tool_name}가 같은 오류로 {count}회 연속 실패했습니다. 같은 재시도를 멈추고 접근을 바꾸세요."
+    return None
+
+
+def claude_hook_warning(payload: dict) -> str | None:
+    transcript_path = payload.get("transcript_path")
+    if not isinstance(transcript_path, str):
+        return None
+    hit = trailing_repeat_failure(extract_tool_events(Path(transcript_path)))
+    if not hit:
+        return None
+    tool_name, count = hit
+    return f"[loop-detector] {tool_name} has failed the same way {count} times in a row. Stop retrying the same fix — reconsider the approach."
+
+
 def cmd_hook() -> None:
-    """PostToolUseFailure hook entry point. Must never break the agent's turn: any
-    internal error or missing/unreadable transcript falls through to exit 0 silently."""
+    """Claude Code and Codex hook entry point. Internal failures stay fail-open."""
     try:
         payload = json.load(sys.stdin)
-        events = list(extract_tool_events(Path(payload["transcript_path"])))
-        hit = trailing_repeat_failure(events)
+        event_name = payload.get("hook_event_name")
+        if event_name == "PostToolUse":
+            warning = codex_hook_warning(payload)
+            if warning:
+                print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": warning}}, ensure_ascii=False))
+            return
+        warning = claude_hook_warning(payload) if event_name == "PostToolUseFailure" else None
     except Exception:
-        hit = None
-    if hit:
-        tool_name, count = hit
-        print(
-            f"[loop-detector] {tool_name} has failed the same way {count} times in a row. "
-            "Stop retrying the same fix — reconsider the approach.",
-            file=sys.stderr,
-        )
+        warning = None
+    if warning:
+        print(warning, file=sys.stderr)
         sys.exit(2)
-    sys.exit(0)
 
 
 def main():
@@ -187,7 +257,7 @@ def main():
     scan_p = sub.add_parser("scan", help="scan current project's latest session (or --all)")
     scan_p.add_argument("--all", action="store_true", help="scan every session across all projects")
     scan_p.add_argument("--json", action="store_true", help="emit JSON instead of text")
-    sub.add_parser("hook", help="PostToolUseFailure hook entry point (reads hook JSON from stdin)")
+    sub.add_parser("hook", help="Claude Code/Codex hook entry point (reads hook JSON from stdin)")
     args = ap.parse_args()
 
     if args.cmd == "hook":

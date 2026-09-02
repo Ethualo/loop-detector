@@ -1,6 +1,6 @@
-# claude-loop-detector
+# loop-detector
 
-AI 코딩 에이전트(Claude Code 우선, 추후 Cursor 등) 세션 transcript(JSONL)에서 반복 실패 패턴을 탐지하는 CLI 도구. Phase 1(사후 스캔) 완료, 599개 세션 실측 코퍼스로 튜닝됨. Phase 2(실시간 훅) 스크립트 구현·테스트 완료, `settings.json` 등록은 아직 안 함(유저 승인 대기).
+AI 코딩 에이전트 세션의 반복 실패 패턴을 탐지하는 CLI 도구. Phase 1은 Claude Code transcript 스캐너이고, Phase 2는 Claude Code와 Codex의 공식 훅으로 실시간 경고한다.
 
 ## 구조
 
@@ -18,33 +18,13 @@ test_loop_detector.py   # assert 기반 self-check
 python loop_detector.py scan          # 현재 cwd 프로젝트 최신 세션
 python loop_detector.py scan --all    # 전체 세션
 python loop_detector.py scan --json
-python loop_detector.py hook          # PostToolUseFailure 훅 진입점, stdin으로 훅 JSON 받음
+python loop_detector.py hook          # Claude Code/Codex 훅 진입점, stdin으로 훅 JSON 받음
 ```
 
-### 훅 등록 (Phase 2, 수동 적용 필요)
+### 공식 훅 설치
 
-`~/.claude/settings.json`의 `hooks.PostToolUseFailure`에 추가:
-
-```json
-{
-  "hooks": {
-    "PostToolUseFailure": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python C:\\Users\\user\\Desktop\\git_projects\\claude-loop-detector\\loop_detector.py hook",
-            "timeout": 10
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-같은 도구가 같은 마스킹된 에러로 연속 3회 이상 실패하면 stderr로 경고 + exit 2(Claude에게 컨텍스트로 노출, 차단은 아님). 그 외엔 exit 0 무음.
+- Claude Code는 커밋된 `.claude/settings.json`을 프로젝트 설정으로 읽는다. `PostToolUseFailure`에서 기존 transcript tail을 판정하고, 반복 실패면 stderr + exit 2로 Claude에게 경고한다.
+- Codex는 커밋된 `.codex/hooks.json`을 공식 프로젝트 훅 위치로 읽는다. 새 Codex 세션에서 `/hooks`로 훅을 검토·신뢰하면 `PostToolUse`의 Bash non-zero 결과를 세션별로 3회 추적해 `additionalContext` 경고를 준다. 전역 설정 수정은 필요 없다.
 
 ## 테스트
 
@@ -64,8 +44,8 @@ detector 로직(파서/fingerprint/각 탐지기)마다 assert 기반 최소 케
 - **no_progress (무진행) 판정**: `(tool, 원본 미마스킹 input)` 동일값 연속 3회+ — **output 텍스트가 아니라 input으로 그룹화**. 이유: Edit/Write 성공 메시지("The file has been updated successfully...")나 Bash "no output", Grep "No matches found" 같은 짧은 고정 문구는 마스킹하면 서로 다른 대상(다른 파일/명령/패턴)인데도 동일 텍스트로 수렴해 대량 오탐 발생 — 599개 실제 세션 첫 스캔에서 no_progress 580건 중 상당수가 이 버그였음(Bash 379건). input 기반으로 바꾸니 진짜 신호만 남음(no_progress 4건). repeat_failure는 output 마스킹 유지 — 에러 텍스트는 재시도마다 자연히 달라지는 내용이 있어 이 문제가 없었고, 오히려 output 마스킹이 있어야 (동일 원인, 다른 placeholder) 케이스를 잡음.
 - **파서 경계**: "raw jsonl → 정규화 Event" 단계만 교체 가능하게 분리. Claude Code 파서만 지금 구현, 다른 에이전트 포맷은 필요해질 때 추가.
 - **1단계 = 사후 스캔(on-demand CLI)**, 실시간 훅은 2단계. 근거: 전체 재파싱 9ms 실측, 상태 파일 관리가 오히려 버그 표면 늘림.
-- **2단계(실시간)**: 증분 state 파일 없이 매번 재파싱 + `PostToolUseFailure` 훅(실패 시에만 발화, Claude Code 실제 이벤트로 확인됨 — 2026-09 기준 문서 직접 조회)에 얹기. 훅 스크립트는 내부 실패 시 반드시 exit 0(fail-open) — `cmd_hook()`에서 전체를 try/except로 감싸고 예외 시 hit=None.
-- **훅 판정 로직**: 매 실패 시 transcript 전체 재파싱 후 `iter_runs()`로 얻은 맨 끝(tail) run만 확인 — 그 run이 error이고 count>=3이면 경고. 과거에 있었다가 이미 끊긴 루프는 무시(tail 기준이라 자연히 걸러짐). `no_progress`는 훅 대상 아님(성공 케이스라 PostToolUseFailure에 안 걸림) — `scan`에서만 감지.
+- **2단계(실시간)**: Claude Code는 `PostToolUseFailure`에서 transcript tail을 재파싱한다. Codex는 `PostToolUse` payload의 `session_id`, `tool_name`, `tool_response`만 사용해 Bash non-zero를 세션별 임시 상태로 판정한다. Codex transcript 형식은 공식 안정 인터페이스가 아니므로 의존하지 않는다. 두 경로 모두 내부 예외 시 fail-open이다.
+- **훅 판정 로직**: Claude Code는 tail run이 error이고 count>=3일 때만 경고한다. Codex는 같은 마스킹된 응답을 3회 연속 실패로 세고 성공 결과에서 상태를 비운다. `no_progress`는 성공도 포함하는 오프라인 `scan`에서만 감지한다.
 - **stdout/stderr 인코딩**: Windows cp949 콘솔에서 한글/이모지 dash(—) 등 출력 시 `UnicodeEncodeError` 발생 — `main()` 진입 시 `sys.stdout`/`sys.stderr` 둘 다 `.reconfigure(encoding="utf-8", errors="replace")` 필수(훅 경고 메시지도 stderr로 나가므로 stderr도 필요).
 
 ## 주의사항
@@ -74,4 +54,29 @@ detector 로직(파서/fingerprint/각 탐지기)마다 assert 기반 최소 케
 - gateguard 훅의 `[Fact-Forcing Gate]` 반복 차단 메시지가 repeat_failure로 잡히는 건 정상(버그 아님) — 실제로 확인됨.
 - 2단계 훅을 실시간으로 붙일 때 gateguard 사례처럼 "탐지기가 자기 자신의 루프를 만드는" 자기증폭 위험 있음 — exit 0 폴백 필수.
 - 새 tool 추가 시 짧은 고정 성공/무출력 메시지("완료", "no output", "not found" 류)를 리턴하는지 확인 — no_progress는 input 기반이라 안전하지만, 향후 repeat_failure 쪽에 같은 tool의 에러 메시지가 지나치게 짧고 고정적이면 동일 오탐 재발 가능.
-- 훅은 실제 settings.json 등록 전, 합성 transcript(3연속 동일 Bash 실패)로만 end-to-end 검증됨 — 실제 Claude Code 세션에서의 타이밍(현재 실패 레코드가 hook 발화 시점에 transcript 파일에 이미 써져 있는지)은 미검증 가정. 안 써져 있으면 그 호출에서만 감지 놓치고 다음 실패 때 카운트됨 — 크래시 아님, 성능/카운트 오프바이원 정도.
+- Claude Code 훅은 합성 transcript(3연속 동일 Bash 실패)로 검증됐다. Codex는 공식 hook payload를 합성해 검증했으며, `/hooks` 신뢰 후 실제 Codex 세션에서 라이브 검증이 남아 있다.
+
+<!-- handoff:learnings:begin -->
+## Session Learnings (auto-updated by handoff)
+
+### Implicit Rules
+- Windows 10, PowerShell primary shell, Python 3.13.9 invoked as `python` (never `python3` — broken Windows Store stub).
+- No external dependencies — stdlib only, single flat script (explicit project convention per user's global CLAUDE.md).
+- Session transcripts sourced from `~/.claude/projects/*/*.jsonl` (main) + `~/.claude/projects/*/*/subagents/*.jsonl` (subagents) — both paths scanned.
+- Gateguard hook requires 4 stated facts before first Bash/Edit/Write call per turn-block — normal, not bug.
+- Claude Code has 33 distinct hook events including separate PostToolUse (success-only) and PostToolUseFailure (failure-only), verified via direct docs fetch (code.claude.com/docs/en/hooks, 2026-09).
+- Settings.json hook registration format: `hooks.<EventName>[].matcher` + `.hooks[].{type:'command', command, timeout}`. Currently registered top-level hook keys: SessionStart, UserPromptSubmit, PreToolUse, SubagentStart — no PostToolUseFailure yet.
+- Editing `~/.claude/settings.json` from within session blocked by auto-mode permission classifier — hard environment constraint, not something to route around; needs user manual application or explicit permission-rule grant.
+- User's GitHub account: `Ethualo`.
+
+### Key Decisions
+- Decision: repeat_failure grouped by (tool_name, masked_output_fingerprint); no_progress grouped by (tool_name, RAW unmasked tool_input) — Reason: masking correct for recurring-error text (naturally varies without over-collision) but wrong for non-error boilerplate (many tools return fixed text becoming identical after masking regardless of real target). Input-based grouping restores real identity.
+- Decision: REPEAT_THRESHOLD unified to 3 for both finding types — Reason: dropped unnecessary separate NO_PROGRESS_THRESHOLD=5; single value clarifies intent.
+- Decision: Phase 2 hook implements ONLY repeat_failure, not no_progress — Reason: wired to PostToolUseFailure (failure-only event), so non-error no_progress signal unobservable there. no_progress stays scan-only/offline.
+- Decision: Hook re-parses whole transcript on every failure, inspects only trailing/still-open run via iter_runs() generator — Reason: avoids flagging loop already broken earlier in session; matches 'happening right now' intent. Reparsing cheap (~9ms measured).
+- Decision: Verified PostToolUseFailure as distinct Claude Code hook event via direct docs fetch (code.claude.com/docs/en/hooks) — Reason: independently re-confirmed rather than trusted from prior session memory or subagent first-pass claim.
+- Decision: Dropped `claude_` prefix from both script filenames per explicit user request — Reason: cleaner naming, matches user direction.
+- Decision: stdout AND stderr reconfigured with utf-8 encoding on Windows — Reason: console cp949 throws UnicodeEncodeError on Korean text or em-dash otherwise.
+- Decision: When settings.json edit blocked by permission classifier, escalated to user with exact snippet instead of attempting workaround — Reason: denial message warns against routing-around 'in malicious ways'; editing global security-adjacent config goes through user hands or explicit permission grant, not forced retry.
+
+<!-- handoff:learnings:end -->

@@ -1,0 +1,18 @@
+{
+  "description": "Warn when Bash repeats the same failed output.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/loop_detector.py\" hook",
+            "commandWindows": "powershell.exe -NoProfile -Command \"& python (Join-Path (git rev-parse --show-toplevel) 'loop_detector.py') hook\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
