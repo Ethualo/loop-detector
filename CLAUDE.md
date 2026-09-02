@@ -5,8 +5,8 @@ AI 코딩 에이전트(Claude Code 우선, 추후 Cursor 등) 세션 transcript(
 ## 구조
 
 ```
-claude_loop_detector.py        # 단일 stdlib 스크립트
-test_claude_loop_detector.py   # assert 기반 self-check
+loop_detector.py        # 단일 stdlib 스크립트
+test_loop_detector.py   # assert 기반 self-check
 ```
 
 패키지 분리(`pyproject.toml`, `detectors/` 서브패키지, `windowing.py`, `report.py` 등)는 하지 않는다.
@@ -15,10 +15,10 @@ test_claude_loop_detector.py   # assert 기반 self-check
 ## 실행
 
 ```
-python claude_loop_detector.py scan          # 현재 cwd 프로젝트 최신 세션
-python claude_loop_detector.py scan --all    # 전체 세션
-python claude_loop_detector.py scan --json
-python claude_loop_detector.py hook          # PostToolUseFailure 훅 진입점, stdin으로 훅 JSON 받음
+python loop_detector.py scan          # 현재 cwd 프로젝트 최신 세션
+python loop_detector.py scan --all    # 전체 세션
+python loop_detector.py scan --json
+python loop_detector.py hook          # PostToolUseFailure 훅 진입점, stdin으로 훅 JSON 받음
 ```
 
 ### 훅 등록 (Phase 2, 수동 적용 필요)
@@ -34,7 +34,7 @@ python claude_loop_detector.py hook          # PostToolUseFailure 훅 진입점,
         "hooks": [
           {
             "type": "command",
-            "command": "python C:\\Users\\user\\Desktop\\git_projects\\claude-loop-detector\\claude_loop_detector.py hook",
+            "command": "python C:\\Users\\user\\Desktop\\git_projects\\claude-loop-detector\\loop_detector.py hook",
             "timeout": 10
           }
         ]
@@ -49,7 +49,7 @@ python claude_loop_detector.py hook          # PostToolUseFailure 훅 진입점,
 ## 테스트
 
 detector 로직(파서/fingerprint/각 탐지기)마다 assert 기반 최소 케이스 1개. 프레임워크·픽스처 없음.
-`python test_claude_loop_detector.py` 로 실행.
+`python test_loop_detector.py` 로 실행.
 
 ## 환경
 

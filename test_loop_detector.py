@@ -1,5 +1,5 @@
 """Minimal assert-based checks. No framework, per project convention."""
-from claude_loop_detector import fingerprint, detect_repeated_runs, trailing_repeat_failure
+from loop_detector import fingerprint, detect_repeated_runs, trailing_repeat_failure
 
 
 def test_fingerprint_masks_placeholders():
