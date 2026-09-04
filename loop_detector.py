@@ -14,10 +14,13 @@ from typing import Any, Iterator
 
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 REPEAT_THRESHOLD = 3
+MAX_PENDING_TOOL_USES = 4096
+CODEX_STATE_VERSION = 1
 
 # order matters: strip identifiers before the generic \d+ mask eats their digits
 MASK_PATTERNS = [
     (re.compile(r"toolu_[A-Za-z0-9]+"), "<TOOLU>"),
+    (re.compile(r'"(?:[A-Za-z]:\\[^"\r\n]+|/(?:home|Users|c|mnt)/[^"\r\n]+)"'), "<PATH>"),
     (re.compile(r"[A-Za-z]:\\[^\s\"']+|/(?:home|Users|c|mnt)/[^\s\"']+"), "<PATH>"),
     (re.compile(r"\d{4}-\d{2}-\d{2}T[\d:.]+Z?"), "<TS>"),
     (re.compile(r"\b[0-9a-f]{7,64}\b", re.I), "<HASH>"),
@@ -39,19 +42,21 @@ def target_key(tool_input: Any) -> str:
     the signal is 'same target, called again', not 'same output text', because short
     success/no-op messages (e.g. Edit's fixed confirmation) collide across unrelated
     targets once masked and would otherwise look like a stuck loop."""
-    return json.dumps(tool_input, ensure_ascii=False, sort_keys=True)[:300]
+    return json.dumps(tool_input, ensure_ascii=False, sort_keys=True)
 
 
 def iter_records(path: Path) -> Iterator[dict]:
-    with open(path, encoding="utf-8") as f:
+    with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             try:
-                yield json.loads(line)
+                record = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if isinstance(record, dict):
+                yield record
 
 
 def session_cwd(path: Path) -> str | None:
@@ -88,19 +93,32 @@ def extract_tool_events(path: Path) -> Iterator[tuple[str, bool, str, Any]]:
             if not isinstance(block, dict):
                 continue
             if block.get("type") == "tool_use":
-                pending[block.get("id")] = (block.get("name", "?"), block.get("input"))
+                tool_id = block.get("id")
+                tool_name = block.get("name")
+                if not isinstance(tool_id, str) or not tool_id or not isinstance(tool_name, str) or not tool_name or "input" not in block:
+                    continue
+                if tool_id not in pending and len(pending) >= MAX_PENDING_TOOL_USES:
+                    pending.pop(next(iter(pending)))
+                pending[tool_id] = (tool_name, block["input"])
             elif block.get("type") == "tool_result":
-                name, tool_input = pending.get(block.get("tool_use_id"), ("?", None))
-                yield (name, bool(block.get("is_error")), fingerprint(block.get("content")), tool_input)
+                tool_id = block.get("tool_use_id")
+                is_error = block.get("is_error", False)
+                if not isinstance(tool_id, str) or not tool_id or not isinstance(is_error, bool):
+                    continue
+                pair = pending.pop(tool_id, None)
+                if pair is None:
+                    continue
+                name, tool_input = pair
+                yield (name, is_error, fingerprint(block.get("content")), tool_input)
 
 
-def iter_runs(events) -> Iterator[tuple[tuple[str, str], bool, int]]:
+def iter_runs(events) -> Iterator[tuple[tuple[str, str, bool], bool, int]]:
     """Collapse events into maximal consecutive runs of the same grouping key,
     yielding (key, is_error, count) — including the trailing run at end of input,
     which the hook command uses to check 'is a loop happening right now'."""
     run_key, run_is_error, run_count = None, False, 0
     for name, is_error, output_fp, tool_input in events:
-        key = (name, output_fp) if is_error else (name, target_key(tool_input))
+        key = (name, output_fp, True) if is_error else (name, target_key(tool_input), False)
         if key == run_key:
             run_count += 1
         else:
@@ -120,7 +138,8 @@ def detect_repeated_runs(events) -> list[dict]:
     for key, is_error, count in iter_runs(events):
         if count >= REPEAT_THRESHOLD:
             kind = "repeat_failure" if is_error else "no_progress"
-            findings.append({"type": kind, "tool": key[0], "count": count, "fingerprint": key[1]})
+            display_fingerprint = key[1] if is_error else key[1][:300]
+            findings.append({"type": kind, "tool": key[0], "count": count, "fingerprint": display_fingerprint})
     return findings
 
 
@@ -207,17 +226,42 @@ def codex_hook_warning(payload: dict, state_dir: Path | None = None) -> str | No
         return None
 
     fingerprint_value = fingerprint(payload["tool_response"])
+    fingerprint_digest = hashlib.sha256(fingerprint_value.encode("utf-8")).hexdigest()
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         state = {}
-    count = state.get("count", 0) + 1 if state.get("tool") == tool_name and state.get("fingerprint") == fingerprint_value else 1
+    valid_state = (
+        isinstance(state, dict)
+        and state.get("schema_version") == CODEX_STATE_VERSION
+        and isinstance(state.get("tool"), str)
+        and isinstance(state.get("fingerprint"), str)
+        and isinstance(state.get("count"), int)
+        and not isinstance(state.get("count"), bool)
+        and state.get("count") >= 1
+        and isinstance(state.get("warned"), bool)
+    )
+    same_failure = valid_state and state["tool"] == tool_name and state["fingerprint"] == fingerprint_digest
+    count = state["count"] + 1 if same_failure else 1
+    warned = state["warned"] if same_failure else False
+    should_warn = count >= REPEAT_THRESHOLD and not warned
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps({"tool": tool_name, "fingerprint": fingerprint_value, "count": count}), encoding="utf-8")
+    temporary.write_text(
+        json.dumps(
+            {
+                "schema_version": CODEX_STATE_VERSION,
+                "tool": tool_name,
+                "fingerprint": fingerprint_digest,
+                "count": count,
+                "warned": warned or count >= REPEAT_THRESHOLD,
+            }
+        ),
+        encoding="utf-8",
+    )
     # ponytail: same-session parallel hooks can lose an increment; add file locking if Codex starts them concurrently.
     temporary.replace(path)
-    if count >= REPEAT_THRESHOLD:
+    if should_warn:
         return f"[loop-detector] {tool_name}가 같은 오류로 {count}회 연속 실패했습니다. 같은 재시도를 멈추고 접근을 바꾸세요."
     return None
 
@@ -264,7 +308,7 @@ def install_hook(settings: dict, event: str, matcher: str, handler: dict) -> boo
             args = existing.get("args", [])
             if not isinstance(args, list):
                 raise ValueError("hook handler args must be a JSON array")
-            values = [existing.get("command", ""), *args]
+            values = [existing.get("command", ""), existing.get("commandWindows", ""), *args]
             if any("loop_detector.py" in str(value) for value in values):
                 return False
         handlers.append(handler)
@@ -295,10 +339,13 @@ def install_configs(target: Path) -> list[tuple[Path, bool]]:
         (target / ".claude" / "settings.json", "PostToolUseFailure", "*", claude_handler),
         (target / ".codex" / "hooks.json", "PostToolUse", "^Bash$", codex_handler),
     ]
-    results = []
+    prepared = []
     for path, event, matcher, handler in targets:
         settings = read_settings(path)
         changed = install_hook(settings, event, matcher, handler)
+        prepared.append((path, settings, changed))
+    results = []
+    for path, settings, changed in prepared:
         if changed:
             write_settings(path, settings)
         results.append((path, changed))

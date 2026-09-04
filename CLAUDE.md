@@ -31,10 +31,11 @@ python loop_detector.py install --target C:\path\to\project
 - Claude Code는 커밋된 `.claude/settings.json`을 프로젝트 설정으로 읽는다. `PostToolUseFailure`에서 기존 transcript tail을 판정하고, 반복 실패면 stderr + exit 2로 Claude에게 경고한다.
 - Codex는 커밋된 `.codex/hooks.json`을 공식 프로젝트 훅 위치로 읽는다. 새 Codex 세션에서 `/hooks`로 훅을 검토·신뢰하면 `PostToolUse`의 Bash non-zero 결과를 세션별로 3회 추적해 `additionalContext` 경고를 준다. 전역 설정 수정은 필요 없다.
 - `install`은 대상 프로젝트의 두 JSON 설정을 병합해 이 스크립트의 절대 경로를 등록한다. 기존 훅은 보존하고, 이미 등록된 loop-detector 훅은 중복 추가하지 않는다.
+- `install`은 두 설정을 먼저 모두 읽고 검증한 뒤 변경 파일을 기록한다. 한쪽 JSON이 잘못되면 기록하지 않는다.
 
 ### 플러그인 포장
 
-- Codex는 `.codex-plugin/plugin.json`과 기본 경로 `hooks/hooks.json`의 `PostToolUse` 훅을 사용한다. 훅 명령은 `PLUGIN_ROOT`로 플러그인 루트를 참조한다.
+- Codex는 `.codex-plugin/plugin.json`과 기본 경로 `hooks/hooks.json`의 `PostToolUse` 훅을 사용한다. 공통 셸 명령은 양쪽이 제공하는 `CLAUDE_PLUGIN_ROOT`, Codex Windows 명령은 `PLUGIN_ROOT`를 사용한다. 플러그인은 Python 3.10+의 `python` 명령이 필요하다.
 - Claude Code는 `.claude-plugin/plugin.json`과 기본 경로 `hooks/hooks.json`의 `PostToolUseFailure` 훅을 사용한다. 훅 명령은 `CLAUDE_PLUGIN_ROOT`로 플러그인 루트를 참조한다.
 - 기존 `.claude/settings.json`과 `.codex/hooks.json`은 프로젝트 설정을 직접 설치하는 호환 경로로 유지한다. 플러그인과 프로젝트 설정을 동시에 켜면 같은 이벤트가 중복 실행될 수 있다.
 - MCP 서버는 포함하지 않는다. 현재 기능은 훅과 CLI로 충분하며, 별도 온디맨드 도구가 필요해질 때 추가한다.
@@ -59,6 +60,8 @@ detector 로직(파서/fingerprint/각 탐지기)마다 assert 기반 최소 케
 - **1단계 = 사후 스캔(on-demand CLI)**, 실시간 훅은 2단계. 근거: 전체 재파싱 9ms 실측, 상태 파일 관리가 오히려 버그 표면 늘림.
 - **2단계(실시간)**: Claude Code는 `PostToolUseFailure`에서 transcript tail을 재파싱한다. Codex는 `PostToolUse` payload의 `session_id`, `tool_name`, `tool_response`만 사용해 Bash non-zero를 세션별 임시 상태로 판정한다. Codex transcript 형식은 공식 안정 인터페이스가 아니므로 의존하지 않는다. 두 경로 모두 내부 예외 시 fail-open이다.
 - **훅 판정 로직**: Claude Code는 tail run이 error이고 count>=3일 때만 경고한다. Codex는 같은 마스킹된 응답을 3회 연속 실패로 세고 성공 결과에서 상태를 비운다. `no_progress`는 성공도 포함하는 오프라인 `scan`에서만 감지한다.
+- **탐색기 경계**: `target_key`는 정렬된 전체 JSON 입력으로 그룹화하고 화면 출력만 300자로 자른다. JSONL 파서는 잘못된 UTF-8·비객체·orphan/incomplete tool pair를 무시하며 보류 tool_use는 4096개로 제한한다.
+- **Codex 상태**: 상태 파일은 schema version 1과 SHA-256 fingerprint를 저장하고, 동일 루프에는 임계치 경고를 한 번만 보낸다. 이전·손상 상태는 새 카운트로 초기화한다.
 - **stdout/stderr 인코딩**: Windows cp949 콘솔에서 한글/이모지 dash(—) 등 출력 시 `UnicodeEncodeError` 발생 — `main()` 진입 시 `sys.stdout`/`sys.stderr` 둘 다 `.reconfigure(encoding="utf-8", errors="replace")` 필수(훅 경고 메시지도 stderr로 나가므로 stderr도 필요).
 
 ## 주의사항
@@ -67,7 +70,8 @@ detector 로직(파서/fingerprint/각 탐지기)마다 assert 기반 최소 케
 - gateguard 훅의 `[Fact-Forcing Gate]` 반복 차단 메시지가 repeat_failure로 잡히는 건 정상(버그 아님) — 실제로 확인됨.
 - 2단계 훅을 실시간으로 붙일 때 gateguard 사례처럼 "탐지기가 자기 자신의 루프를 만드는" 자기증폭 위험 있음 — exit 0 폴백 필수.
 - 새 tool 추가 시 짧은 고정 성공/무출력 메시지("완료", "no output", "not found" 류)를 리턴하는지 확인 — no_progress는 input 기반이라 안전하지만, 향후 repeat_failure 쪽에 같은 tool의 에러 메시지가 지나치게 짧고 고정적이면 동일 오탐 재발 가능.
-- Claude Code 훅은 합성 transcript(3연속 동일 Bash 실패)로 검증됐다. Codex는 공식 hook payload를 합성해 검증했으며, `/hooks` 신뢰 후 실제 Codex 세션에서 라이브 검증이 남아 있다.
+- 합성 transcript/payload를 설정된 명령에 전달하는 별도 프로세스 통합 테스트가 공백 경로에서 통과했다. 2026-09-04 Codex `hooks/list`에서 프로젝트 훅이 enabled/trusted임을 확인했지만 현재 세션의 자동 경고는 관찰되지 않았다. Claude CLI는 이 환경에 없으며, 양쪽 네이티브 자동 발화 검증은 남아 있다.
+- 설치의 사전 검증은 테스트했지만, 두 파일을 기록하는 중 디스크 오류가 발생할 때의 교차 파일 롤백과 같은 세션 훅의 동시 실행 잠금은 아직 구현하지 않았다.
 
 <!-- handoff:learnings:begin -->
 ## Session Learnings (auto-updated by handoff)

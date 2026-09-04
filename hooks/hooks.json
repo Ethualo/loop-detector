@@ -23,7 +23,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$PLUGIN_ROOT/loop_detector.py\" hook",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/loop_detector.py\" hook",
             "commandWindows": "powershell.exe -NoProfile -Command \"& python (Join-Path $env:PLUGIN_ROOT 'loop_detector.py') hook\"",
             "timeout": 10
           }
