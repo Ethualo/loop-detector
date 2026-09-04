@@ -130,6 +130,19 @@ def test_install_hook_rejects_invalid_existing_args():
         assert False, "invalid hook args must not be overwritten"
 
 
+def test_plugin_manifests_and_bundled_hooks():
+    root = Path(__file__).parent
+    codex = json.loads((root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    claude = json.loads((root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    codex_hooks = json.loads((root / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    assert codex["name"] == claude["name"] == "loop-detector"
+    assert "hooks" not in codex
+    assert codex_hooks["hooks"]["PostToolUse"][0]["matcher"] == "^Bash$"
+    assert codex_hooks["hooks"]["PostToolUseFailure"][0]["matcher"] == "*"
+    assert "${CLAUDE_PLUGIN_ROOT}" in codex_hooks["hooks"]["PostToolUseFailure"][0]["hooks"][0]["args"][0]
+    assert "$PLUGIN_ROOT" in codex_hooks["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+
+
 if __name__ == "__main__":
     test_fingerprint_masks_placeholders()
     test_detect_repeated_runs_finds_retry_loop()
@@ -144,4 +157,5 @@ if __name__ == "__main__":
     test_install_hook_merges_without_duplicate_or_overwrite()
     test_install_configs_creates_both_configs_and_is_idempotent()
     test_install_hook_rejects_invalid_existing_args()
+    test_plugin_manifests_and_bundled_hooks()
     print("all checks passed")

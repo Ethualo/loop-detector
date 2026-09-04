@@ -1,0 +1,11 @@
+{
+  "name": "loop-detector",
+  "version": "0.1.0",
+  "description": "Detect repeated failures and no-progress loops in Claude Code and Codex sessions.",
+  "author": {
+    "name": "Ethualo",
+    "url": "https://github.com/Ethualo"
+  },
+  "repository": "https://github.com/Ethualo/loop-detector",
+  "license": "MIT"
+}

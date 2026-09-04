@@ -5,8 +5,11 @@ AI 코딩 에이전트 세션의 반복 실패 패턴을 탐지하는 CLI 도구
 ## 구조
 
 ```
-loop_detector.py        # 단일 stdlib 스크립트
-test_loop_detector.py   # assert 기반 self-check
+loop_detector.py              # 단일 stdlib 스크립트
+test_loop_detector.py         # assert 기반 self-check
+.codex-plugin/plugin.json     # Codex 플러그인 manifest
+.claude-plugin/plugin.json    # Claude Code 플러그인 manifest
+hooks/hooks.json              # Claude Code/Codex 기본 번들 훅
 ```
 
 패키지 분리(`pyproject.toml`, `detectors/` 서브패키지, `windowing.py`, `report.py` 등)는 하지 않는다.
@@ -28,6 +31,13 @@ python loop_detector.py install --target C:\path\to\project
 - Claude Code는 커밋된 `.claude/settings.json`을 프로젝트 설정으로 읽는다. `PostToolUseFailure`에서 기존 transcript tail을 판정하고, 반복 실패면 stderr + exit 2로 Claude에게 경고한다.
 - Codex는 커밋된 `.codex/hooks.json`을 공식 프로젝트 훅 위치로 읽는다. 새 Codex 세션에서 `/hooks`로 훅을 검토·신뢰하면 `PostToolUse`의 Bash non-zero 결과를 세션별로 3회 추적해 `additionalContext` 경고를 준다. 전역 설정 수정은 필요 없다.
 - `install`은 대상 프로젝트의 두 JSON 설정을 병합해 이 스크립트의 절대 경로를 등록한다. 기존 훅은 보존하고, 이미 등록된 loop-detector 훅은 중복 추가하지 않는다.
+
+### 플러그인 포장
+
+- Codex는 `.codex-plugin/plugin.json`과 기본 경로 `hooks/hooks.json`의 `PostToolUse` 훅을 사용한다. 훅 명령은 `PLUGIN_ROOT`로 플러그인 루트를 참조한다.
+- Claude Code는 `.claude-plugin/plugin.json`과 기본 경로 `hooks/hooks.json`의 `PostToolUseFailure` 훅을 사용한다. 훅 명령은 `CLAUDE_PLUGIN_ROOT`로 플러그인 루트를 참조한다.
+- 기존 `.claude/settings.json`과 `.codex/hooks.json`은 프로젝트 설정을 직접 설치하는 호환 경로로 유지한다. 플러그인과 프로젝트 설정을 동시에 켜면 같은 이벤트가 중복 실행될 수 있다.
+- MCP 서버는 포함하지 않는다. 현재 기능은 훅과 CLI로 충분하며, 별도 온디맨드 도구가 필요해질 때 추가한다.
 
 ## 테스트
 

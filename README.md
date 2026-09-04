@@ -29,6 +29,26 @@ python loop_detector.py scan --json
 
 기본 `scan`은 현재 작업 디렉터리에 해당하는 가장 최신 Claude Code 세션 하나를 검사합니다. `--all`은 모든 세션을 검사합니다.
 
+## 플러그인 설치
+
+저장소 루트 자체가 Claude Code와 Codex 플러그인 루트입니다. 두 플랫폼이 같은 `loop_detector.py`와 `hooks/hooks.json`을 사용하며, 각 플랫폼이 자신의 이벤트만 실행합니다.
+
+### Claude Code
+
+개발 중인 플러그인은 `--plugin-dir`로 바로 로드할 수 있습니다.
+
+```powershell
+claude --plugin-dir C:\path\to\loop-detector
+```
+
+플러그인에는 Claude Code의 `PostToolUseFailure` 훅이 포함됩니다. 대상 프로젝트에 기존 `install` 명령으로 같은 훅을 등록했다면 한 경로만 활성화해야 중복 경고를 피할 수 있습니다.
+
+### Codex
+
+Codex 플러그인은 기본 `hooks/hooks.json`의 Bash `PostToolUse` 훅을 사용합니다. 플러그인을 설치한 뒤 새 세션에서 `/hooks`를 열어 훅을 검토하고 신뢰하세요.
+
+공개 marketplace 등록은 별도 배포 단계입니다. 현재 저장소는 Claude Code의 직접 플러그인 로딩과 기존 프로젝트용 `install` 명령을 함께 지원합니다.
+
 ## 탐지 기준
 
 | 결과 | 조건 |

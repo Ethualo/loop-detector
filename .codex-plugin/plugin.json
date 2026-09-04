@@ -1,0 +1,29 @@
+{
+  "name": "loop-detector",
+  "version": "0.1.0",
+  "description": "Detect repeated failures and no-progress loops in Claude Code and Codex sessions.",
+  "author": {
+    "name": "Ethualo",
+    "url": "https://github.com/Ethualo"
+  },
+  "homepage": "https://github.com/Ethualo/loop-detector",
+  "repository": "https://github.com/Ethualo/loop-detector",
+  "license": "MIT",
+  "keywords": [
+    "loop-detection",
+    "agent-hooks",
+    "claude-code",
+    "codex"
+  ],
+  "interface": {
+    "displayName": "Loop Detector",
+    "shortDescription": "Detect repeated coding-agent failures.",
+    "longDescription": "Fail-open Claude Code and Codex hooks plus a standard-library scanner for repeated failures and no-progress loops.",
+    "developerName": "Ethualo",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Analysis"
+    ],
+    "defaultPrompt": "Scan this project for repeated agent failures."
+  }
+}

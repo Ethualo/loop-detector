@@ -1,0 +1,34 @@
+{
+  "description": "Warn when Claude Code or Codex repeats the same failed tool result.",
+  "hooks": {
+    "PostToolUseFailure": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/loop_detector.py",
+              "hook"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/loop_detector.py\" hook",
+            "commandWindows": "powershell.exe -NoProfile -Command \"& python (Join-Path $env:PLUGIN_ROOT 'loop_detector.py') hook\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
