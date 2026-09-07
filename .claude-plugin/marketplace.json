@@ -1,0 +1,16 @@
+{
+  "name": "loop-detector-marketplace",
+  "description": "Self-hosted marketplace for the loop-detector plugin.",
+  "owner": {
+    "name": "Ethualo",
+    "url": "https://github.com/Ethualo"
+  },
+  "plugins": [
+    {
+      "name": "loop-detector",
+      "source": "./",
+      "description": "Detect repeated failures and no-progress loops in Claude Code and Codex sessions.",
+      "version": "0.1.1"
+    }
+  ]
+}
