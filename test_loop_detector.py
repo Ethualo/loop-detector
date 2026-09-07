@@ -276,7 +276,8 @@ def test_plugin_manifests_and_bundled_hooks():
     assert "hooks" not in codex
     assert codex_hooks["hooks"]["PostToolUse"][0]["matcher"] == "^Bash$"
     assert codex_hooks["hooks"]["PostToolUseFailure"][0]["matcher"] == "*"
-    assert "${CLAUDE_PLUGIN_ROOT}" in codex_hooks["hooks"]["PostToolUseFailure"][0]["hooks"][0]["args"][0]
+    assert "${CLAUDE_PLUGIN_ROOT}" in codex_hooks["hooks"]["PostToolUseFailure"][0]["hooks"][0]["command"]
+    assert "args" not in codex_hooks["hooks"]["PostToolUseFailure"][0]["hooks"][0]
     assert "${CLAUDE_PLUGIN_ROOT}" in codex_hooks["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
 
 
@@ -325,8 +326,11 @@ def test_bundled_hook_commands_execute_from_space_path():
             ])
         transcript.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
         handler = hooks["PostToolUseFailure"][0]["hooks"][0]
-        args = [arg.replace("${CLAUDE_PLUGIN_ROOT}", str(plugin)) for arg in handler["args"]]
-        result = invoke([handler["command"], *args], {"hook_event_name": "PostToolUseFailure", "transcript_path": str(transcript)})
+        failure_command = handler["command"].replace("${CLAUDE_PLUGIN_ROOT}", str(plugin).replace("\\", "/"))
+        # PostToolUseFailure has no commandWindows override, so Claude Code runs it through its
+        # default shell (bash, when Git Bash is present, even on Windows) rather than PowerShell,
+        # which mangles a Python sys.exit(2) into exit code 1.
+        result = invoke(["sh", "-c", failure_command], {"hook_event_name": "PostToolUseFailure", "transcript_path": str(transcript)})
         assert result.returncode == 2 and not result.stdout and "3 times" in result.stderr
         result = invoke([sys.executable, str(plugin / "loop_detector.py"), "hook"], [])
         assert (result.returncode, result.stdout, result.stderr) == (0, "", "")

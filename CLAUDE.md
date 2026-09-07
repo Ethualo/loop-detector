@@ -70,30 +70,29 @@ detector 로직(파서/fingerprint/각 탐지기)마다 assert 기반 최소 케
 - gateguard 훅의 `[Fact-Forcing Gate]` 반복 차단 메시지가 repeat_failure로 잡히는 건 정상(버그 아님) — 실제로 확인됨.
 - 2단계 훅을 실시간으로 붙일 때 gateguard 사례처럼 "탐지기가 자기 자신의 루프를 만드는" 자기증폭 위험 있음 — exit 0 폴백 필수.
 - 새 tool 추가 시 짧은 고정 성공/무출력 메시지("완료", "no output", "not found" 류)를 리턴하는지 확인 — no_progress는 input 기반이라 안전하지만, 향후 repeat_failure 쪽에 같은 tool의 에러 메시지가 지나치게 짧고 고정적이면 동일 오탐 재발 가능.
-- 합성 transcript/payload를 설정된 명령에 전달하는 별도 프로세스 통합 테스트가 공백 경로에서 통과했다. 2026-09-04 Codex `hooks/list`에서 프로젝트 훅이 enabled/trusted임을 확인했지만 현재 세션의 자동 경고는 관찰되지 않았다. Claude CLI는 이 환경에 없으며, 양쪽 네이티브 자동 발화 검증은 남아 있다.
+- 합성 transcript/payload를 설정된 명령에 전달하는 별도 프로세스 통합 테스트가 공백 경로에서 통과했다. 2026-09-04 Codex `hooks/list`에서 프로젝트 훅이 enabled/trusted임을 확인했지만 현재 세션의 자동 경고는 관찰되지 않았다.
 - 설치의 사전 검증은 테스트했지만, 두 파일을 기록하는 중 디스크 오류가 발생할 때의 교차 파일 롤백과 같은 세션 훅의 동시 실행 잠금은 아직 구현하지 않았다.
+- **2026-09-07 라이브 검증**: `.claude/settings.json` 프로젝트 훅 경로는 실제 대화형 Claude Code 세션(desktop app)에서 Bash 동일 실패 3회 연속 시 정확히 `[loop-detector] Bash has failed the same way 3 times in a row...` stderr+exit2로 발화함을 실측 확인 — 경고가 3번째 실패 직후가 아니라 다음 턴에 붙어 나타나는 1턴 지연은 있으나(하네스 렌더링 지연 추정, `scan`/`trailing_repeat_failure` 재현으로 로직 자체는 정확함을 별도 확인), 발화 자체는 정상.
+- **`claude -p ...`로 `PostToolUseFailure` 훅 발화 여부를 스크립트 테스트할 때 nested 세션의 최종 텍스트 답변을 믿지 말 것** — 훅 경고는 `tool_result` 블록 안이 아니라 transcript jsonl에 별도 `{"type":"attachment","attachment":{"type":"hook_blocking_error","hookName":"PostToolUseFailure:..."}}` 레코드로 찍힌다. nested 세션한테 "tool_result 내용 그대로 보고해"라고 물으면 이 attachment를 보고 안 해서 "무발화"로 오판하기 쉽다 — 반드시 nested 세션의 실제 transcript 파일(`~/.claude/projects/<mangled-cwd>/*.jsonl`)에서 `attachment.type == "hook_blocking_error"` 레코드를 직접 확인할 것.
+- **정정된 결론 #2 (틀림, #3에서 재정정됨)**: 유저가 대화형 세션(v2.1.263, `claude --plugin-dir <이 리포>`)에서 exec-form `PostToolUseFailure` 3회 실패로 재현 — 무발화. exec-form을 shell-form(`"command": "python \"${CLAUDE_PLUGIN_ROOT}/loop_detector.py\" hook"`)으로 바꾸면 될 거라 판단해 수정, 테스트도 `sh -c`(Git Bash)로 맞춤(PowerShell은 `sys.exit(2)`를 자체 종료코드 1로 뭉갬 — 별개 함정, Claude Code 기본 shell은 bash라 실사용 무관).
+- **최종 확정 원인 #3**: shell-form으로 고친 뒤 유저가 새 대화형 세션에서 재검증 — **여전히 무발화**. `/hooks` 확인 결과 PostToolUseFailure에 "No hooks configured for this event". `/hooks`가 플러그인 훅을 아예 안 보여주는 UI 한계일 수 있다는 의심으로, 무조건 즉시 발화하는 최소 테스트 플러그인(`echo TESTHOOKFIRED >&2; exit 2`, 임계치 없음, 실패 1회면 바로 떠야 함)을 새 대화형 세션에서 `--plugin-dir`로 테스트 — **이것도 무발화**. exec-form/shell-form/`description` 필드/스크립트 내용/임계치 전부 배제됨. **결론: 이 Claude Code CLI 버전(v2.1.263)은 `--plugin-dir`로 로드한 `PostToolUseFailure` 훅을 대화형 세션에서 아예 등록하지 않는다 — 이 리포 설정 문제가 아니라 CLI 자체 한계/버그.** 더 이상 hooks.json을 만지며 이 증상을 쫓지 말 것 — 원인이 이 리포 바깥(`--plugin-dir`의 훅 등록 단계)에 있다. shell-form/`description` 제거는 공식 스키마에 맞는 정리로 남겨두되(둘 다 실제 수정 원인은 아니었음), 실시간 경고가 필요하면 `install` 명령의 project-hook(`.claude/settings.json`) 경로를 쓸 것 — 이건 두 번 실측 확인됨. README.md에도 이 한계 명시함.
 
 <!-- handoff:learnings:begin -->
 ## Session Learnings (auto-updated by handoff)
 
 ### Implicit Rules
-- Windows 10, PowerShell primary shell, Python 3.13.9 invoked as `python` (never `python3` — broken Windows Store stub).
-- No external dependencies — stdlib only, single flat script (explicit project convention per user's global CLAUDE.md).
-- Session transcripts sourced from `~/.claude/projects/*/*.jsonl` (main) + `~/.claude/projects/*/*/subagents/*.jsonl` (subagents) — both paths scanned.
-- Gateguard hook requires 4 stated facts before first Bash/Edit/Write call per turn-block — normal, not bug.
-- Claude Code has 33 distinct hook events including separate PostToolUse (success-only) and PostToolUseFailure (failure-only), verified via direct docs fetch (code.claude.com/docs/en/hooks, 2026-09).
-- Settings.json hook registration format: `hooks.<EventName>[].matcher` + `.hooks[].{type:'command', command, timeout}`. Currently registered top-level hook keys: SessionStart, UserPromptSubmit, PreToolUse, SubagentStart — no PostToolUseFailure yet.
-- Editing `~/.claude/settings.json` from within session blocked by auto-mode permission classifier — hard environment constraint, not something to route around; needs user manual application or explicit permission-rule grant.
-- User's GitHub account: `Ethualo`.
+- Windows PowerShell; invoke Python as python, never python3.
+- stdlib-only flat script; no dependency or package split without demonstrated need.
+- Preserve unrelated .handoff/* and AGENTS.md worktree changes; do not include them in commits.
+- Hooks fail open on internal errors; Codex project hooks require /hooks review/trust.
+- Use absolute repository paths for installed project hook commands; source script must remain in place.
 
 ### Key Decisions
-- Decision: repeat_failure grouped by (tool_name, masked_output_fingerprint); no_progress grouped by (tool_name, RAW unmasked tool_input) — Reason: masking correct for recurring-error text (naturally varies without over-collision) but wrong for non-error boilerplate (many tools return fixed text becoming identical after masking regardless of real target). Input-based grouping restores real identity.
-- Decision: REPEAT_THRESHOLD unified to 3 for both finding types — Reason: dropped unnecessary separate NO_PROGRESS_THRESHOLD=5; single value clarifies intent.
-- Decision: Phase 2 hook implements ONLY repeat_failure, not no_progress — Reason: wired to PostToolUseFailure (failure-only event), so non-error no_progress signal unobservable there. no_progress stays scan-only/offline.
-- Decision: Hook re-parses whole transcript on every failure, inspects only trailing/still-open run via iter_runs() generator — Reason: avoids flagging loop already broken earlier in session; matches 'happening right now' intent. Reparsing cheap (~9ms measured).
-- Decision: Verified PostToolUseFailure as distinct Claude Code hook event via direct docs fetch (code.claude.com/docs/en/hooks) — Reason: independently re-confirmed rather than trusted from prior session memory or subagent first-pass claim.
-- Decision: Dropped `claude_` prefix from both script filenames per explicit user request — Reason: cleaner naming, matches user direction.
-- Decision: stdout AND stderr reconfigured with utf-8 encoding on Windows — Reason: console cp949 throws UnicodeEncodeError on Korean text or em-dash otherwise.
-- Decision: When settings.json edit blocked by permission classifier, escalated to user with exact snippet instead of attempting workaround — Reason: denial message warns against routing-around 'in malicious ways'; editing global security-adjacent config goes through user hands or explicit permission grant, not forced retry.
+- Decision: keep flat stdlib Python script — Reason: project scope and existing workflow need no package/dependency overhead.
+- Decision: use full canonical JSON target identity with 300-character display truncation — Reason: grouping must not collide after long common prefixes while reports stay readable.
+- Decision: ignore malformed/orphan transcript pairs and cap pending tool uses at 4096 — Reason: protect scan correctness and memory at untrusted JSONL boundaries.
+- Decision: store Codex state schema 1 with SHA-256 fingerprint and warned flag — Reason: avoid raw response persistence, migrate/reset legacy state safely, and warn once per active loop.
+- Decision: preflight both project config files before writing — Reason: malformed second config must not leave the first partially installed.
+- Decision: support Claude Code and Codex through official plugin/project hook paths — Reason: user rejected bypassing protected global settings and requested both platforms.
 
 <!-- handoff:learnings:end -->

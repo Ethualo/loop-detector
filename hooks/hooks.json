@@ -1,5 +1,4 @@
 {
-  "description": "Warn when Claude Code or Codex repeats the same failed tool result.",
   "hooks": {
     "PostToolUseFailure": [
       {
@@ -7,11 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python",
-            "args": [
-              "${CLAUDE_PLUGIN_ROOT}/loop_detector.py",
-              "hook"
-            ],
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/loop_detector.py\" hook",
             "timeout": 10
           }
         ]

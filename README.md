@@ -41,7 +41,7 @@ python loop_detector.py scan --json
 claude --plugin-dir C:\path\to\loop-detector
 ```
 
-플러그인에는 Claude Code의 `PostToolUseFailure` 훅이 포함됩니다. 대상 프로젝트에 기존 `install` 명령으로 같은 훅을 등록했다면 한 경로만 활성화해야 중복 경고를 피할 수 있습니다.
+플러그인에는 Claude Code의 `PostToolUseFailure` 훅이 포함되어 있지만, **2026-09-07 실측 결과 `--plugin-dir`로 로드한 `PostToolUseFailure`는 대화형 Claude Code 세션(v2.1.263)에서 등록 자체가 되지 않습니다** — 무조건 발화하는 최소 테스트 훅으로도 재현되며 `/hooks`에서도 "No hooks configured for this event"로 나타나, 이 저장소의 훅 설정과 무관한 Claude Code CLI 쪽 제약으로 보입니다. 실시간 경고가 필요하면 아래 [공식 훅 설치](#공식-훅-설치)의 `install` 명령(프로젝트 `.claude/settings.json`)을 쓰세요 — 이 경로는 실제 대화형 세션에서 발화가 확인되었습니다.
 
 ### Codex
 
@@ -89,12 +89,14 @@ python test_loop_detector.py
 
 테스트에는 공백이 있는 플러그인 경로에서 설정된 훅 명령을 별도 프로세스로 실행하는 검증이 포함됩니다. Claude 실패 경고(stderr/exit 2), Codex 3회째 한 번 경고(JSON/exit 0), 잘못된 입력의 무음 종료를 확인합니다. 테스트용 상태는 임시 디렉터리에만 저장합니다.
 
-2026-09-04 Windows 검증: 프로세스 통합 테스트를 통과했고 Codex 공식 `hooks/list`에서 이 프로젝트 훅의 활성화·신뢰 상태를 확인했습니다. 현재 작업 세션의 실제 실패 명령에서는 자동 경고를 관찰하지 못했으므로, 네이티브 자동 발화는 검증 완료로 간주하지 않습니다. Claude CLI는 이 환경에 없습니다.
+2026-09-04 Windows 검증: 프로세스 통합 테스트를 통과했고 Codex 공식 `hooks/list`에서 이 프로젝트 훅의 활성화·신뢰 상태를 확인했습니다.
+
+2026-09-07 실측: Claude Code `.claude/settings.json` 프로젝트 훅(`install` 명령이 등록하는 것과 동일)은 실제 대화형 Claude Code 세션에서 Bash 동일 실패 3회 연속 시 정상 발화함을 확인했습니다(사용자가 직접 재현). 반면 `.claude-plugin` + `hooks/hooks.json` 패키지를 `--plugin-dir`로 로드하는 경로는, 무조건 발화하는 최소 테스트 훅으로도 대화형 세션에서 무발화로 재현되어 — 이 저장소의 훅 설정 문제가 아니라 Claude Code CLI가 `--plugin-dir`로 로드한 `PostToolUseFailure`를 등록하지 않는 것으로 보입니다(`/hooks`에서도 "No hooks configured for this event"). 실시간 경고에는 `install` 명령을 쓰세요.
 
 ## 한계
 
 - Codex의 실시간 감지는 현재 Bash non-zero 결과만 다룹니다.
-- 플랫폼 CLI가 실제 실패 이벤트를 전달하고 모델이 경고를 수신하는 최종 검증은 남아 있습니다. Codex는 새 세션에서 `/hooks` 상태를 확인하고, Claude Code는 CLI 설치 후 `--plugin-dir`로 검증합니다.
+- `--plugin-dir`로 로드한 Claude Code `PostToolUseFailure`는 현재 실사용에서 발화하지 않는 것으로 확인되었습니다(위 실측 참고) — 실시간 경고가 필요하면 `install` 명령의 프로젝트 훅을 쓰세요. Codex는 새 세션에서 `/hooks` 상태를 확인하세요.
 - Codex 상태 파일은 버전 1과 해시된 fingerprint를 사용하며, 손상되거나 이전 형식이면 새 루프로 초기화합니다.
 - 같은 세션에서 훅 프로세스가 동시에 실행되면 카운트 증가가 경합할 수 있습니다. 실제 병렬 실행이 확인될 때 파일 잠금을 추가합니다.
 - 두 설정 파일의 사전 검증 뒤 기록 단계에서 디스크 오류가 나면 한 파일만 먼저 기록될 수 있으므로, 실패 시 파일 상태를 확인하세요.
