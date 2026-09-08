@@ -1,1 +1,0 @@
-2026-09-02T05:46:04.184Z | failure pattern detector, Claude Code transcripts, JSONL parsing, on-demand CLI, side project | Build CLI tool scanning AI agent session transcripts (JSONL) for repeated-failure patterns: retry loops on same error, v | 2026-09-02/handoff-2026-09-02T05-46-04-184Z.md
