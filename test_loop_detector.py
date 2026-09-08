@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from loop_detector import claude_hook_warning, codex_hook_warning, detect_repeated_runs, extract_tool_events, fingerprint, hook_state_path, install_configs, install_hook, iter_records, read_settings, target_key, trailing_repeat_failure
+from loop_detector import claude_hook_warning, codex_hook_warning, detect_repeated_runs, extract_tool_events, fingerprint, hook_state_path, install_configs, install_hook, iter_records, read_settings, target_key
 
 
 def test_fingerprint_masks_placeholders():
@@ -130,33 +130,32 @@ def test_extract_tool_events_bounds_unmatched_tool_use_memory():
         assert list(extract_tool_events(transcript)) == [("Read", False, "ok", {"file_path": "a.py"})]
 
 
-def test_trailing_repeat_failure_detects_active_loop_at_tail():
-    events = [("Bash", True, "same error", {"command": "x"})] * 3
-    assert trailing_repeat_failure(events) == ("Bash", 3)
-
-
-def test_trailing_repeat_failure_none_when_loop_already_broken():
-    # the run at the very end is a single success, even though 3 failures preceded it
-    events = [("Bash", True, "same error", {"command": "x"})] * 3 + [("Bash", False, "ok", {"command": "y"})]
-    assert trailing_repeat_failure(events) is None
-
-
-def test_trailing_repeat_failure_none_below_threshold():
-    events = [("Bash", True, "same error", {"command": "x"})] * 2
-    assert trailing_repeat_failure(events) is None
-
-
-def test_claude_hook_warning_uses_failed_transcript_tail():
+def test_claude_hook_warning_reports_three_matching_bash_failures():
     with TemporaryDirectory(dir=Path(__file__).parent) as directory:
-        transcript = Path(directory) / "session.jsonl"
-        records = []
-        for number in range(3):
-            records.extend([
-                {"message": {"content": [{"type": "tool_use", "id": f"toolu_{number}", "name": "Bash", "input": {"command": "npm test"}}]}},
-                {"message": {"content": [{"type": "tool_result", "tool_use_id": f"toolu_{number}", "is_error": True, "content": "test failed"}]}},
-            ])
-        transcript.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
-        warning = claude_hook_warning({"transcript_path": str(transcript)})
+        state_dir = Path(directory)
+        failure = {
+            "hook_event_name": "PostToolUseFailure",
+            "session_id": "session-1",
+            "tool_name": "Bash",
+            "error": "test failed at C:\\work\\a.py:12",
+        }
+        assert claude_hook_warning(failure, state_dir) is None
+        assert claude_hook_warning(failure, state_dir) is None
+        warning = claude_hook_warning(failure, state_dir)
+        assert warning and "3 times" in warning
+        assert claude_hook_warning(failure, state_dir) is None  # already warned once, no repeat
+
+
+def test_claude_hook_warning_resets_on_different_error():
+    with TemporaryDirectory(dir=Path(__file__).parent) as directory:
+        state_dir = Path(directory)
+        first = {"hook_event_name": "PostToolUseFailure", "session_id": "session-1", "tool_name": "Bash", "error": "npm test failed"}
+        second = {**first, "error": "pytest failed"}
+        assert claude_hook_warning(first, state_dir) is None
+        assert claude_hook_warning(first, state_dir) is None
+        assert claude_hook_warning(second, state_dir) is None  # different error restarts the streak at 1
+        assert claude_hook_warning(second, state_dir) is None
+        warning = claude_hook_warning(second, state_dir)
         assert warning and "3 times" in warning
 
 
@@ -272,7 +271,7 @@ def test_plugin_manifests_and_bundled_hooks():
     claude = json.loads((root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
     codex_hooks = json.loads((root / "hooks" / "hooks.json").read_text(encoding="utf-8"))
     assert codex["name"] == claude["name"] == "loop-detector"
-    assert codex["version"] == claude["version"] == "0.1.1"
+    assert codex["version"] == claude["version"] == "0.1.2"
     assert "hooks" not in codex
     assert codex_hooks["hooks"]["PostToolUse"][0]["matcher"] == "^Bash$"
     assert codex_hooks["hooks"]["PostToolUseFailure"][0]["matcher"] == "*"
@@ -317,21 +316,15 @@ def test_bundled_hook_commands_execute_from_space_path():
         assert [bool(result.stdout) for result in results] == [False, False, True, False]
         assert json.loads(results[2].stdout)["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
 
-        transcript = plugin / "session.jsonl"
-        records = []
-        for number in range(3):
-            records.extend([
-                {"message": {"content": [{"type": "tool_use", "id": str(number), "name": "Bash", "input": {}}]}},
-                {"message": {"content": [{"type": "tool_result", "tool_use_id": str(number), "is_error": True, "content": "same error"}]}},
-            ])
-        transcript.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
         handler = hooks["PostToolUseFailure"][0]["hooks"][0]
         failure_command = handler["command"].replace("${CLAUDE_PLUGIN_ROOT}", str(plugin).replace("\\", "/"))
+        claude_failure = {"hook_event_name": "PostToolUseFailure", "session_id": "claude-integration", "tool_name": "Bash", "error": "same error"}
         # PostToolUseFailure has no commandWindows override, so Claude Code runs it through its
         # default shell (bash, when Git Bash is present, even on Windows) rather than PowerShell,
         # which mangles a Python sys.exit(2) into exit code 1.
-        result = invoke(["sh", "-c", failure_command], {"hook_event_name": "PostToolUseFailure", "transcript_path": str(transcript)})
-        assert result.returncode == 2 and not result.stdout and "3 times" in result.stderr
+        results = [invoke(["sh", "-c", failure_command], claude_failure) for _ in range(3)]
+        assert [(item.returncode, bool(item.stdout)) for item in results[:2]] == [(0, False), (0, False)]
+        assert results[2].returncode == 2 and not results[2].stdout and "3 times" in results[2].stderr
         result = invoke([sys.executable, str(plugin / "loop_detector.py"), "hook"], [])
         assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
 
@@ -348,10 +341,8 @@ if __name__ == "__main__":
     test_iter_records_skips_invalid_utf8_and_non_objects()
     test_extract_tool_events_skips_orphan_and_incomplete_pairs()
     test_extract_tool_events_bounds_unmatched_tool_use_memory()
-    test_trailing_repeat_failure_detects_active_loop_at_tail()
-    test_trailing_repeat_failure_none_when_loop_already_broken()
-    test_trailing_repeat_failure_none_below_threshold()
-    test_claude_hook_warning_uses_failed_transcript_tail()
+    test_claude_hook_warning_reports_three_matching_bash_failures()
+    test_claude_hook_warning_resets_on_different_error()
     test_codex_hook_warning_reports_three_matching_bash_failures_and_clears_on_success()
     test_codex_hook_warning_only_reports_once_and_migrates_legacy_state()
     test_install_hook_merges_without_duplicate_or_overwrite()

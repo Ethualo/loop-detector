@@ -15,7 +15,7 @@ from typing import Any, Iterator
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 REPEAT_THRESHOLD = 3
 MAX_PENDING_TOOL_USES = 4096
-CODEX_STATE_VERSION = 1
+STATE_VERSION = 1
 
 # order matters: strip identifiers before the generic \d+ mask eats their digits
 MASK_PATTERNS = [
@@ -114,8 +114,7 @@ def extract_tool_events(path: Path) -> Iterator[tuple[str, bool, str, Any]]:
 
 def iter_runs(events) -> Iterator[tuple[tuple[str, str, bool], bool, int]]:
     """Collapse events into maximal consecutive runs of the same grouping key,
-    yielding (key, is_error, count) — including the trailing run at end of input,
-    which the hook command uses to check 'is a loop happening right now'."""
+    yielding (key, is_error, count)."""
     run_key, run_is_error, run_count = None, False, 0
     for name, is_error, output_fp, tool_input in events:
         key = (name, output_fp, True) if is_error else (name, target_key(tool_input), False)
@@ -146,19 +145,6 @@ def detect_repeated_runs(events) -> list[dict]:
 def scan_session(path: Path) -> list[dict]:
     events = list(extract_tool_events(path))
     return detect_repeated_runs(events)
-
-
-def trailing_repeat_failure(events) -> tuple[str, int] | None:
-    """(tool_name, count) if the run still open at the end of events is a failing
-    retry loop at/above threshold, else None. Used by the PostToolUseFailure hook to
-    ask 'is the call that just failed part of a loop right now' without a full scan."""
-    runs = list(iter_runs(events))
-    if not runs:
-        return None
-    key, is_error, count = runs[-1]
-    if is_error and count >= REPEAT_THRESHOLD:
-        return key[0], count
-    return None
 
 
 def cmd_scan(args) -> None:
@@ -210,30 +196,21 @@ def hook_state_path(session_id: str, state_dir: Path) -> Path:
     return state_dir / f"{digest}.json"
 
 
-def codex_hook_warning(payload: dict, state_dir: Path | None = None) -> str | None:
-    if payload.get("hook_event_name") != "PostToolUse":
-        return None
-    session_id = payload.get("session_id")
-    tool_name = payload.get("tool_name")
-    failed = response_failed(payload.get("tool_response"))
-    if not isinstance(session_id, str) or not isinstance(tool_name, str) or failed is None:
-        return None
-
-    state_root = state_dir or Path(tempfile.gettempdir()) / "loop-detector"
-    path = hook_state_path(session_id, state_root)
-    if not failed:
-        path.unlink(missing_ok=True)
-        return None
-
-    fingerprint_value = fingerprint(payload["tool_response"])
+def record_consecutive_failure(session_id: str, tool_name: str, fingerprint_value: str, state_dir: Path) -> tuple[int, bool]:
+    """Bump (or start) a same-tool same-(masked)fingerprint failure streak in a
+    per-session state file. Returns (count, should_warn_now). Shared by the Claude
+    and Codex hooks so both count directly off each hook payload's own fields
+    instead of re-parsing the transcript file, which can lag the just-failed call
+    by a turn or more and silently push 'N in a row' past N."""
     fingerprint_digest = hashlib.sha256(fingerprint_value.encode("utf-8")).hexdigest()
+    path = hook_state_path(session_id, state_dir)
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         state = {}
     valid_state = (
         isinstance(state, dict)
-        and state.get("schema_version") == CODEX_STATE_VERSION
+        and state.get("schema_version") == STATE_VERSION
         and isinstance(state.get("tool"), str)
         and isinstance(state.get("fingerprint"), str)
         and isinstance(state.get("count"), int)
@@ -250,7 +227,7 @@ def codex_hook_warning(payload: dict, state_dir: Path | None = None) -> str | No
     temporary.write_text(
         json.dumps(
             {
-                "schema_version": CODEX_STATE_VERSION,
+                "schema_version": STATE_VERSION,
                 "tool": tool_name,
                 "fingerprint": fingerprint_digest,
                 "count": count,
@@ -259,22 +236,53 @@ def codex_hook_warning(payload: dict, state_dir: Path | None = None) -> str | No
         ),
         encoding="utf-8",
     )
-    # ponytail: same-session parallel hooks can lose an increment; add file locking if Codex starts them concurrently.
+    # ponytail: same-session parallel hooks can lose an increment; add file locking if that starts happening.
     temporary.replace(path)
+    return count, should_warn
+
+
+def codex_hook_warning(payload: dict, state_dir: Path | None = None) -> str | None:
+    if payload.get("hook_event_name") != "PostToolUse":
+        return None
+    session_id = payload.get("session_id")
+    tool_name = payload.get("tool_name")
+    failed = response_failed(payload.get("tool_response"))
+    if not isinstance(session_id, str) or not isinstance(tool_name, str) or failed is None:
+        return None
+
+    state_root = state_dir or Path(tempfile.gettempdir()) / "loop-detector"
+    if not failed:
+        hook_state_path(session_id, state_root).unlink(missing_ok=True)
+        return None
+
+    fingerprint_value = fingerprint(payload["tool_response"])
+    count, should_warn = record_consecutive_failure(session_id, tool_name, fingerprint_value, state_root)
     if should_warn:
         return f"[loop-detector] {tool_name}가 같은 오류로 {count}회 연속 실패했습니다. 같은 재시도를 멈추고 접근을 바꾸세요."
     return None
 
 
-def claude_hook_warning(payload: dict) -> str | None:
-    transcript_path = payload.get("transcript_path")
-    if not isinstance(transcript_path, str):
+def claude_hook_warning(payload: dict, state_dir: Path | None = None) -> str | None:
+    """Same approach as codex_hook_warning: count directly off this PostToolUseFailure
+    payload's own tool_name/error fields via per-session state, not the transcript
+    file (see record_consecutive_failure). Trade-off: unlike Codex, Claude Code has
+    no matching 'succeeded' hook to reset the streak on an intervening success —
+    PostToolUseFailure only fires on failure — so a success in between two identical
+    failures no longer breaks the count. Acceptable: firing on time beats firing late."""
+    if payload.get("hook_event_name") != "PostToolUseFailure":
         return None
-    hit = trailing_repeat_failure(extract_tool_events(Path(transcript_path)))
-    if not hit:
+    session_id = payload.get("session_id")
+    tool_name = payload.get("tool_name")
+    error = payload.get("error")
+    if not isinstance(session_id, str) or not isinstance(tool_name, str) or not isinstance(error, str):
         return None
-    tool_name, count = hit
-    return f"[loop-detector] {tool_name} has failed the same way {count} times in a row. Stop retrying the same fix — reconsider the approach."
+
+    state_root = state_dir or Path(tempfile.gettempdir()) / "loop-detector-claude"
+    fingerprint_value = fingerprint(error)
+    count, should_warn = record_consecutive_failure(session_id, tool_name, fingerprint_value, state_root)
+    if should_warn:
+        return f"[loop-detector] {tool_name} has failed the same way {count} times in a row. Stop retrying the same fix — reconsider the approach."
+    return None
 
 
 def read_settings(path: Path) -> dict:

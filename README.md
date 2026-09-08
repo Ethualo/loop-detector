@@ -73,7 +73,7 @@ python C:\path\to\loop-detector\loop_detector.py install --target C:\path\to\ano
 
 ### Claude Code
 
-[`.claude/settings.json`](.claude/settings.json)이 프로젝트 설정으로 `PostToolUseFailure` 훅을 등록합니다. 실패 직후 transcript의 마지막 연속 실패 구간을 검사하며, 3회째에 stderr와 exit 2로 경고합니다.
+[`.claude/settings.json`](.claude/settings.json)이 프로젝트 설정으로 `PostToolUseFailure` 훅을 등록합니다. Codex 훅과 동일하게 payload 자체의 `tool_name`/`error`를 세션별 임시 상태 파일로 직접 추적하며, 같은 도구가 같은 마스킹 오류로 3회째 실패하면 stderr와 exit 2로 경고합니다. (0.1.2 이전 버전은 매 호출마다 transcript 파일을 다시 읽어 판정했는데, 그 파일이 실제 호출보다 지연되어 있어 3회가 아니라 5~6회 실패해야 경고가 뜨는 버그가 있었습니다 — 실측으로 확인 후 payload 기반 상태 추적으로 고쳤습니다.)
 
 ### Codex
 
